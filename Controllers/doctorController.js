@@ -45,7 +45,7 @@ export const getAllDoctor = async (req, res) => {
         const {query} = req.query;
         let doctors;
         if(query){
-        doctors = await Doctor.find({isApproved:"approved",
+        doctors = await Doctor.find({
             $or: [
                 { name: { $regex: query, $options: "i" } },
                 { specialization: { $regex: query, $options: "i" } },
@@ -53,7 +53,7 @@ export const getAllDoctor = async (req, res) => {
             ],
         }).select("-password -__v");
     }else{
-            doctors = await Doctor.find({isApproved:"approved"}).select("-password -__v");
+            doctors = await Doctor.find().select("-password -__v");
         }
 
         res.status(200).json({ success: true, message: "Doctors found successfully", data: doctors });
