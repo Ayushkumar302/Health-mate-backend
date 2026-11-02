@@ -37,7 +37,8 @@ export const authenticate = async (req, res, next) => {
 
     try {
         // Verify token
-        const decoded = jwt.verify(authToken.split(" ")[1], process.env.JWT_SECRET_KEY);
+        // only accept the algorithm we sign with (blocks "alg: none" and algorithm-swap tricks)
+        const decoded = jwt.verify(authToken.split(" ")[1], process.env.JWT_SECRET_KEY, { algorithms: ["HS256"] });
         req.userId = decoded.id; // Set userId
         req.role = decoded.role; // Set role
         
@@ -49,27 +50,29 @@ export const authenticate = async (req, res, next) => {
         next();
     } catch (error) {
         if (error.name === "TokenExpiredError") {
-            return res.status(401).json({ message: "Token is expired" });
+            return res.status(401).json({ success: false, code: "SESSION_EXPIRED", message: "Your session has expired, please log in again" });
         }
-        return res.status(401).json({ success: false, message: "Invalid token" });
+        return res.status(401).json({ success: false, code: "SESSION_EXPIRED", message: "Please log in again" });
     }
 };
 
 export const restrict = roles=> async(req,res,next)=>{
-    const userId = req.userId;
-    let user;
-    const patient = await User.findById(userId)
-    const doctor =  await Doctor.findById(userId)
+    try {
+        const userId = req.userId;
+        // look up the collection that matches the role in the token
+        const user = req.role === "doctor"
+            ? await Doctor.findById(userId)
+            : await User.findById(userId)
 
-    if(patient){
-        user = patient;
+        // account may have been deleted while the token is still valid
+        if(!user){
+            return res.status(401).json({success:false, code:'SESSION_EXPIRED', message:'Account not found, please log in again'})
+        }
+        if(!roles.includes(user.role)){
+            return res.status(403).json({success:false,message:'You are not allowed to do this'})
+        }
+        next();
+    } catch (error) {
+        return res.status(500).json({success:false,message:'Authorization check failed'})
     }
-    if(doctor){
-        user = doctor;
-    }
-    if(!roles.includes(user.role)){
-        return res.status(401).json({success:false,message:'you are not authorized'})
-
-    }
-    next();
 };
