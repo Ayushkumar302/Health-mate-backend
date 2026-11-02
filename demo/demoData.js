@@ -1,4 +1,4 @@
-// The portfolio demo's data: demo accounts (patients, doctors, admin), sample applications, past visits,
+// The demo's data: demo accounts (patients, doctors, admin), sample applications, past visits,
 // prescriptions, reviews, a conversation, sample files and booking requests. seedDemoData() creates it or
 // puts it back the way it was; it is used by `npm run seed` and by the automatic demo reset.
 import bcrypt from "bcryptjs";
@@ -562,7 +562,7 @@ export const seedDemoData = async () => {
     const file = await saveFile(buffer, { filename: fileName, mime: "application/pdf" });
     await Document.create({ ownerRole, owner, category, title, reportDate, file, fileName, mimeType: "application/pdf", size: buffer.length, locked: true });
   };
-  const sampleNote = "SAMPLE DOCUMENT - generated for the Medora portfolio demo, not a real record.";
+  const sampleNote = "SAMPLE DOCUMENT - generated for the Medora demo, not a real record.";
   await addSample("patient", patient._id, "lab", "Complete blood count", [
     `Patient: ${patientData.name}    Sample collected: ${clinicDate(-5)}`,
     "",

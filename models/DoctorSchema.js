@@ -65,7 +65,7 @@ const DoctorSchema = new mongoose.Schema({
   emailVerified: { type: Boolean },
   emailVerifyTokenHash: { type: String, select: false },
   emailVerifyExpires: { type: Date, select: false },
-  // shared portfolio-demo account, protected from admin changes while the demo is running
+  // shared demo account, protected from admin changes while the demo is running
   isDemo: { type: Boolean, default: false },
   appointments: [{ type: mongoose.Types.ObjectId, ref: "Appointment" }],
 }, { timestamps: true });

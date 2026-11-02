@@ -46,7 +46,7 @@ export const resetDemoData = async () => {
   return seedDemoData();
 };
 
-// the portfolio demo resets itself every DEMO_RESET_HOURS (default 6), at fixed times of the day
+// the demo resets itself every DEMO_RESET_HOURS (default 6), at fixed times of the day
 const resetHours = () => Math.min(24, Math.max(1, Number(process.env.DEMO_RESET_HOURS) || 6));
 
 export const nextResetAt = (now = Date.now()) => {

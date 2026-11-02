@@ -83,7 +83,7 @@ const createStripeSession = (stripe, { doctor, user, booking, date, time, ticket
         client_reference_id:doctor.id,
         // the slot is only held for a limited time, so the payment page expires too
         expires_at: Math.floor(Date.now() / 1000) + STRIPE_SESSION_MINUTES * 60,
-        // with test keys, tell visitors (e.g. interviewers) which card to use, right under the Pay button
+        // with test keys, tell visitors which card to use, right under the Pay button
         ...(process.env.STRIPE_SECRET_KEY?.startsWith('sk_test_') && {
             custom_text: {
                 submit: { message: 'Demo / test mode, no real money: use card 4242 4242 4242 4242, any future date (e.g. 12/34) and any CVC (e.g. 123). If it is declined, use 4000 0035 6000 0008 and click Complete on the bank screen.' },

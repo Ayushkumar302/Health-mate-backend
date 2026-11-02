@@ -2,7 +2,7 @@ import nodemailer from "nodemailer";
 
 // Sends emails through the SMTP server in .env (SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, e.g. Gmail with an
 // App Password). Without one it uses an Ethereal test inbox (https://ethereal.email): nothing reaches a real
-// inbox, and each email gets a preview link instead, which the portfolio demo shows on screen.
+// inbox, and each email gets a preview link instead, which the demo shows on screen.
 
 let transportPromise;
 

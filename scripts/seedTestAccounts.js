@@ -1,4 +1,4 @@
-// Resets the portfolio demo: removes what visitors did with the demo accounts and recreates the demo data.
+// Resets the demo: removes what visitors did with the demo accounts and recreates the demo data.
 // The server also does this on its own every few hours (DEMO_RESET_HOURS). Run from the backend folder: npm run seed
 import dotenv from "dotenv";
 import mongoose from "mongoose";

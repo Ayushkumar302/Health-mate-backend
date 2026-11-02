@@ -28,7 +28,7 @@ const ACTIONS = {
 
 const monthKey = date => date.toISOString().slice(0, 7); // "2026-10"
 
-// In the public portfolio demo the admin only sees demo data: the shared demo accounts and the sample
+// In the public demo the admin only sees demo data: the shared demo accounts and the sample
 // applications. Real accounts in the same database (and their emails) stay hidden, and only the sample
 // applications can be approved or rejected.
 const SAMPLE_APPLICANT = /@applicant\.test$/;
@@ -188,7 +188,7 @@ export const updateDoctorStatus = async (req, res) => {
     }
     // the listed demo doctors have to stay bookable for the next visitor
     if (isDemoMode() && !SAMPLE_APPLICANT.test(doctor.email || "")) {
-      return res.status(403).json({ success: false, message: "The demo doctors are protected in the portfolio demo. Try it on a pending application" });
+      return res.status(403).json({ success: false, message: "The listed demo doctors are protected so the demo keeps working. Try it on a pending application" });
     }
     if (!rule.from.includes(doctor.isApproved)) {
       return res.status(400).json({ success: false, message: `Can't ${action} a doctor who is ${doctor.isApproved}` });

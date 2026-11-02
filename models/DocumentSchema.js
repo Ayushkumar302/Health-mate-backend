@@ -16,7 +16,7 @@ const documentSchema = new mongoose.Schema(
     fileName: { type: String },
     mimeType: { type: String, enum: ["application/pdf", "image/png", "image/jpeg"], required: true },
     size: { type: Number, required: true },
-    // sample files from the seed script, kept in the portfolio demo
+    // sample files from the seed script, kept in the demo
     locked: { type: Boolean, default: false },
   },
   { timestamps: true }

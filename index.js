@@ -137,7 +137,7 @@ connectDB().then(async () => {
   await migrateOldBookings().catch(error => logger.error('Booking migration failed:', error.message));
   // every 5 minutes: cancel and refund requests the doctor never answered
   setInterval(() => expireUnansweredRequests().catch(error => logger.error('Request expiry failed:', error.message)), 5 * 60 * 1000);
-  // portfolio demo: put the demo data back every few hours, whatever visitors did with it.
+  // demo: put the demo data back every few hours, whatever visitors did with it.
   // Off unless DEMO_AUTO_RESET=true, because it deletes what visitors created in the database.
   if (autoResetOn()) scheduleDemoReset(error => logger.error('Demo reset failed:', error));
   server.listen(port, () => {
