@@ -1,6 +1,9 @@
 // Import User model correctly
 import User from "../models/UserSchema.js"; // Ensure UserSchema is exported as User in UserSchema.js
 import Booking from '../models/BookingSchema.js'
+import Review from '../models/ReviewSchema.js'
+import Prescription from '../models/PrescriptionSchema.js'
+import { visitHappened } from '../utils/reviewPrompts.js'
 import bcrypt from 'bcryptjs'
 import { DEMO_MESSAGES, isDemoMode } from '../utils/demo.js'
 import { DEMO_LOCKED_PATIENT_FIELDS, changedLockedFields, sanitizePatientUpdate } from '../utils/validate.js'
@@ -111,13 +114,30 @@ export const getMyAppointments = async(req,res)=>{
     try {
         // return the paid bookings themselves (with doctor details) so status, price and date are kept
         const bookings = await Booking.find({ user: req.userId, isPaid: true })
-            .populate("doctor", "-password -__v -registrationNumber -reviewNote -reviewedAt -emailVerified -isDemo -appointments")
+            .select("-payoutAccount -commissionRate")
+            .populate("doctor", "-password -__v -registrationNumber -reviewNote -reviewedAt -emailVerified -isDemo -appointments -payoutsEnabled -plan -profileViews -instantBooking")
             .sort({ appointmentDate: -1, appointmentTime: -1, createdAt: -1 })
 
         // skip bookings whose doctor account was deleted
         const validBookings = bookings.filter(booking => booking.doctor)
 
-        res.status(200).json({ success: true, message: "Getting appointments", data: validBookings });
+        // which doctors this patient already reviewed, and which visits took place (so a review can be asked for)
+        const [reviewedDoctors, prescribed] = await Promise.all([
+            Review.find({ user: req.userId }).distinct("doctor"),
+            Prescription.find({ user: req.userId }).distinct("booking"),
+        ])
+        const reviewed = new Set(reviewedDoctors.map(String))
+        const withRx = new Set(prescribed.map(String))
+        const data = validBookings.map(booking => {
+            const hasReview = reviewed.has(String(booking.doctor._id))
+            return {
+                ...booking.toObject(),
+                reviewed: hasReview,
+                reviewDue: !hasReview && visitHappened(booking, { hasPrescription: withRx.has(String(booking._id)) }),
+            }
+        })
+
+        res.status(200).json({ success: true, message: "Getting appointments", data });
 
     } catch (error) {
         res.status(500).json({ success: false, message: "oops, somthing went worng" });

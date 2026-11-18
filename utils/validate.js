@@ -8,6 +8,8 @@ const WEEK_DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "satu
 const GENDERS = ["male", "female", "other"];
 const BLOOD_TYPES = ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"];
 const SLOT_DURATIONS = [15, 20, 30, 45, 60];
+const BUFFER_MINUTES = [0, 5, 10, 15];
+const SHIFT_MODES = ["both", "clinic", "online"];
 
 const text = (value, max) => cleanText(value).slice(0, max);
 const isTime = value => /^([01]\d|2[0-3]):[0-5]\d$/.test(value || "");
@@ -104,6 +106,34 @@ export const sanitizePatientUpdate = (body, current) => {
   return { updates };
 };
 
+export const FAMILY_RELATIONS = ["spouse", "child", "parent", "sibling", "other"];
+
+// a Plus Family member's details: name and relation are required, the rest of the small record is optional
+export const sanitizeFamilyMember = body => {
+  const name = text(body?.name, 60);
+  if (name.length < 2) return { error: "Please enter their name" };
+  if (!FAMILY_RELATIONS.includes(body?.relation)) return { error: "Choose how they are related to you" };
+  const member = { name, relation: body.relation };
+  if (body.gender) {
+    if (!GENDERS.includes(body.gender)) return { error: "Please choose a gender" };
+    member.gender = body.gender;
+  }
+  if (body.bloodType) {
+    if (!BLOOD_TYPES.includes(body.bloodType)) return { error: "Please choose a blood type" };
+    member.bloodType = body.bloodType;
+  }
+  if (body.dateOfBirth) {
+    if (!isValidDate(body.dateOfBirth) || body.dateOfBirth > today() || body.dateOfBirth < "1900-01-01") {
+      return { error: "Please enter a valid date of birth" };
+    }
+    member.dateOfBirth = body.dateOfBirth;
+  }
+  for (const field of ["allergies", "conditions", "medications"]) {
+    member[field] = (Array.isArray(body?.[field]) ? body[field] : []).map(item => text(item, 80)).filter(Boolean).slice(0, 20);
+  }
+  return { member };
+};
+
 export const sanitizeDoctorUpdate = (body, current) => {
   const updates = {};
   const error = commonFields(body, updates, current);
@@ -141,17 +171,32 @@ export const sanitizeDoctorUpdate = (body, current) => {
     if (listError) return { error: `Experience: ${listError}` };
     updates.experiences = list;
   }
+  if ("bufferMinutes" in body) {
+    const minutes = Number(body.bufferMinutes);
+    if (!BUFFER_MINUTES.includes(minutes)) return { error: "Choose a break of 0, 5, 10 or 15 minutes" };
+    updates.bufferMinutes = minutes;
+  }
   if ("timeSlots" in body) {
-    if (!Array.isArray(body.timeSlots) || body.timeSlots.length > 21) return { error: "At most 21 weekly time slots" };
+    // the weekly routine: up to 4 shifts a day, each "both", "clinic" (in person only) or "online" (video only)
+    if (!Array.isArray(body.timeSlots) || body.timeSlots.length > 28) return { error: "At most 4 shifts a day" };
     const slots = [];
     for (const slot of body.timeSlots) {
       const day = String(slot?.day || "").toLowerCase();
       if (!WEEK_DAYS.includes(day) || !isTime(slot?.startingTime) || !isTime(slot?.EndingTime) || slot.startingTime >= slot.EndingTime) {
-        return { error: "Each time slot needs a day and a start time before the end time" };
+        return { error: "Each shift needs a day and a start time before the end time" };
       }
-      slots.push({ day, startingTime: slot.startingTime, EndingTime: slot.EndingTime });
+      const mode = slot.mode || "both";
+      if (!SHIFT_MODES.includes(mode)) return { error: "Choose clinic, video or both for each shift" };
+      slots.push({ day, startingTime: slot.startingTime, EndingTime: slot.EndingTime, mode });
     }
-    updates.timeSlots = slots;
+    for (const day of WEEK_DAYS) {
+      const shifts = slots.filter(slot => slot.day === day).sort((a, b) => a.startingTime.localeCompare(b.startingTime));
+      if (shifts.length > 4) return { error: "At most 4 shifts a day" };
+      const overlap = shifts.find((shift, index) => index > 0 && shift.startingTime < shifts[index - 1].EndingTime);
+      if (overlap) return { error: `Two shifts on ${day[0].toUpperCase()}${day.slice(1)} overlap, check the times` };
+    }
+    // kept in week order, so the public profile reads Monday to Sunday
+    updates.timeSlots = slots.sort((a, b) => WEEK_DAYS.indexOf(a.day) - WEEK_DAYS.indexOf(b.day) || a.startingTime.localeCompare(b.startingTime));
   }
   return { updates };
 };

@@ -7,7 +7,10 @@ import { URGENCIES, VISIT_TYPES, askGemini } from "../utils/symptoms/gemini.js";
 import { findEmergency, ruleGuide } from "../utils/symptoms/rules.js";
 import { QUOTA_NOTES, takeAiQuota } from "../utils/ai/quota.js";
 import { cleanText } from "../utils/text.js";
+import { PLUS, aiChecksFor } from "../utils/plus.js";
 import logger from "../utils/logger.js";
+import { englishOnlyNote, readLang } from "../utils/ai/language.js";
+import { LISTED } from "../utils/onboarding.js";
 
 // the form's choices (the website shows the same lists)
 export const CHIPS = [
@@ -28,7 +31,7 @@ let specialtyCache = { at: 0, list: [] };
 const listedSpecialties = async () => {
   if (Date.now() - specialtyCache.at < 5 * 60 * 1000 && specialtyCache.list.length) return specialtyCache.list;
   const groups = await Doctor.aggregate([
-    { $match: { isApproved: "approved", specialization: { $nin: [null, ""] } } },
+    { $match: LISTED },
     { $group: { _id: { $toLower: "$specialization" }, label: { $first: "$specialization" } } },
     { $sort: { _id: 1 } },
   ]);
@@ -67,11 +70,35 @@ const checkAnswer = (answer, keys) => {
     possibleCauses: textList(answer.possibleCauses),
     selfCare: textList(answer.selfCare),
     warningSigns: textList(answer.warningSigns),
+    earlierNote: cleanText(typeof answer.earlierNote === "string" ? answer.earlierNote : "").slice(0, 240),
   };
 };
 
+// the patient's own saved checks of the last 30 days: the checker mentions a related one ("you had a fever on 12 Nov").
+// Nothing new is stored for this; saved checks are deleted with the rest of a visitor's data on a demo reset.
+const EARLIER_DAYS = 30;
+const earlierChecks = async userId =>
+  (await SymptomCheck.find({ user: userId, createdAt: { $gte: new Date(Date.now() - EARLIER_DAYS * 86400000) } })
+    .select("input result createdAt")
+    .sort({ createdAt: -1 })
+    .limit(3))
+    .map(item => ({
+      date: new Date(item.createdAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", timeZone: "Asia/Kolkata" }),
+      described: [item.input?.symptoms, ...(item.input?.chips || [])].filter(Boolean).join(", ").slice(0, 160),
+      chips: item.input?.chips || [],
+      urgency: item.result?.urgency,
+      specialty: item.result?.specialty,
+      specialtyLabel: item.result?.specialtyLabel,
+    }));
+
+// without AI: an earlier check with a symptom in common, or the same kind of doctor
+const earlierNoteByRules = (earlier, input, specialty) => {
+  const related = earlier.find(item => item.chips.some(chip => input.chips.includes(chip)) || item.specialty === specialty);
+  return related ? `You also checked "${related.described}" on ${related.date}. If it keeps coming back, see a doctor rather than waiting.` : "";
+};
+
 const doctorsFor = specialty =>
-  Doctor.find({ isApproved: "approved", specialization: { $regex: `^${specialty.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, $options: "i" } })
+  Doctor.find({ ...LISTED, specialization: { $regex: `^${specialty.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, $options: "i" } })
     .select("name specialization photo averageRating totalRating ticketPrice quickCallFee")
     .sort({ averageRating: -1, totalRating: -1, _id: 1 })
     .limit(3);
@@ -82,6 +109,8 @@ const readInput = body => ({
   ageGroup: AGE_GROUPS[body.ageGroup] ? body.ageGroup : "adult",
   duration: DURATIONS[body.duration] ? body.duration : "today",
   severity: SEVERITIES[body.severity] ? body.severity : "moderate",
+  // the language of the answer (the patient can describe their symptoms in any language)
+  lang: readLang(body.lang),
 });
 
 // POST /symptom-check  body: { symptoms, chips, ageGroup, duration, severity }
@@ -115,11 +144,15 @@ export const checkSymptoms = async (req, res) => {
     let source = "rules";
     let answer;
     let note;
-    const quota = takeAiQuota(req);
+    // Medora Plus members get more AI checks a day
+    const patient = await User.findById(req.userId).select("plus");
+    const allowance = aiChecksFor(patient);
+    const quota = takeAiQuota(req, allowance);
+    const earlier = await earlierChecks(req.userId);
     if (quota === "ok") {
       try {
         const words = { ...input, ageGroup: AGE_GROUPS[input.ageGroup], duration: DURATIONS[input.duration] };
-        ({ answer } = await askGemini(words, keys));
+        ({ answer } = await askGemini(words, keys, input.lang, earlier.map(({ date, described, urgency, specialtyLabel }) => ({ date, described, urgency, specialty: specialtyLabel }))));
         if (answer.notSymptoms === true) {
           return res.status(400).json({ success: false, message: "That doesn't look like a description of symptoms. Try something like \"headache and fever for 2 days\"" });
         }
@@ -129,11 +162,19 @@ export const checkSymptoms = async (req, res) => {
         note = QUOTA_NOTES.busy;
       }
     } else if (quota === "limit") {
-      note = QUOTA_NOTES.limit;
+      note = allowance >= PLUS.aiChecksPerDay
+        ? QUOTA_NOTES.limit
+        : `${QUOTA_NOTES.limit} Medora Plus members get ${PLUS.aiChecksPerDay} AI checks a day.`;
     }
-    if (!answer || source === "rules") answer = ruleGuide(input, keys);
+    if (!answer || source === "rules") {
+      answer = ruleGuide(input, keys);
+      note = [note, englishOnlyNote(input.lang)].filter(Boolean).join(" ") || undefined;
+    }
 
     const checked = checkAnswer(answer, keys);
+    // only about checks that really exist (the AI is given them; the rules look for one in common)
+    if (!earlier.length) checked.earlierNote = "";
+    else if (source === "rules") checked.earlierNote = earlierNoteByRules(earlier, input, checked.specialty);
     const labelOf = key => specialties.find(item => item.key === key)?.label || key;
     const result = {
       ...checked,

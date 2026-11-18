@@ -3,6 +3,7 @@
 // only adds plain-language explanations next to them and may only talk about medicines on the prescription.
 import { generateJson, quoted } from "./gemini.js";
 import { cleanText } from "../text.js";
+import { languageRule } from "./language.js";
 
 const INSTRUCTIONS = `You explain a doctor's prescription to a patient in India, in plain, friendly English.
 
@@ -142,7 +143,7 @@ const checkExplanation = (answer, prescription) => {
 };
 
 // { source: "ai", ...explanation } or throws (the caller then uses plainExplanation)
-export const explainWithAI = async prescription => {
-  const { answer } = await generateJson({ system: INSTRUCTIONS, prompt: `Prescription:\n${describe(prescription)}`, schema: SCHEMA });
+export const explainWithAI = async (prescription, lang = "en") => {
+  const { answer } = await generateJson({ system: INSTRUCTIONS + languageRule(lang), prompt: `Prescription:\n${describe(prescription)}`, schema: SCHEMA });
   return checkExplanation(answer, prescription);
 };

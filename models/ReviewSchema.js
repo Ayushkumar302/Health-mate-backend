@@ -22,6 +22,11 @@ const reviewSchema = new mongoose.Schema(
       max: 5,
       default: 0,
     },
+    // the doctor's public answer to the review
+    reply: {
+      text: { type: String, trim: true, maxLength: 500 },
+      at: { type: Date },
+    },
   },
   { timestamps: true }
 );

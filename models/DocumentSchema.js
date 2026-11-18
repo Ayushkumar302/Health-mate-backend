@@ -9,6 +9,8 @@ const documentSchema = new mongoose.Schema(
   {
     ownerRole: { type: String, enum: ["patient", "doctor"], required: true },
     owner: { type: mongoose.Types.ObjectId, required: true },
+    // a patient's report about one of their family members (Plus Family); none = the account holder's own
+    member: { type: mongoose.Types.ObjectId },
     category: { type: String, enum: [...PATIENT_CATEGORIES, ...DOCTOR_CATEGORIES], required: true },
     title: { type: String, required: true, trim: true, maxLength: 80 },
     reportDate: { type: String }, // "YYYY-MM-DD", for medical reports
@@ -18,6 +20,10 @@ const documentSchema = new mongoose.Schema(
     size: { type: Number, required: true },
     // sample files from the seed script, kept in the demo
     locked: { type: Boolean, default: false },
+    // the AI's explanation for the patient, per language ({ en: {...}, hi: {...} }), and when it was first made
+    // (the first explanation of a report counts toward the patient's monthly allowance)
+    explanations: { type: mongoose.Schema.Types.Mixed, select: false },
+    explainedAt: { type: Date },
   },
   { timestamps: true }
 );

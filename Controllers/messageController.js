@@ -6,6 +6,7 @@ import Doctor from "../models/DoctorSchema.js";
 import User from "../models/UserSchema.js";
 import { getIO, personRoom } from "../socket/io.js";
 import { cleanText, createRateLimiter } from "../utils/text.js";
+import { chatAccess } from "../utils/followUp.js";
 
 // Doctor <-> patient messaging outside of calls. Messages are stored in MongoDB and pushed live
 // over Socket.io to whoever is online. Limits are enforced here, the browser cannot skip them.
@@ -119,10 +120,12 @@ export const getMessages = async (req, res) => {
     // newest page first, then flipped so the browser gets them oldest -> newest
     const messages = await Message.find(filter).sort({ createdAt: -1 }).limit(MESSAGE_LIMITS.pageSize + 1);
     const hasMore = messages.length > MESSAGE_LIMITS.pageSize;
+    // patients: whether they can write right now (follow-up window), so the page can say why not
+    const chat = isDoctor(req) ? { open: true } : await chatAccess(req.userId, conversation.doctor, conversation._id);
     res.status(200).json({
       success: true,
       message: "Messages",
-      data: { messages: messages.slice(0, MESSAGE_LIMITS.pageSize).reverse(), hasMore, limits: MESSAGE_LIMITS },
+      data: { messages: messages.slice(0, MESSAGE_LIMITS.pageSize).reverse(), hasMore, limits: MESSAGE_LIMITS, chat },
     });
   } catch (error) {
     res.status(500).json({ success: false, message: "Could not load messages" });
@@ -149,6 +152,12 @@ export const sendMessage = async (req, res) => {
     const conversation = await findMyConversation(req, req.params.id);
     if (!conversation) {
       return res.status(404).json({ success: false, message: "Conversation not found" });
+    }
+    if (!isDoctor(req)) {
+      const access = await chatAccess(req.userId, conversation.doctor, conversation._id);
+      if (!access.open) {
+        return res.status(403).json({ success: false, code: "FOLLOW_UP_CLOSED", message: access.reason, data: access });
+      }
     }
     const senderRole = isDoctor(req) ? "doctor" : "patient";
     const message = await Message.create({ conversation: conversation._id, senderRole, text });

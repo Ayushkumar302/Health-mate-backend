@@ -13,8 +13,17 @@ import prescriptionRoute from './Routes/prescription.js'
 import messageRoute from './Routes/message.js'
 import documentRoute from './Routes/document.js'
 import symptomRoute from './Routes/symptom.js'
-import { expireUnansweredRequests, migrateOldBookings } from './Controllers/bookingController.js'
+import plusRoute from './Routes/plus.js'
+import notificationRoute from './Routes/notification.js'
+import { syncPlusPlans } from './Controllers/plusController.js'
+import { loadMoneySettings } from './utils/settings.js'
+import { expireUnansweredRequests, migrateOldBookings, settleMissedCalls } from './Controllers/bookingController.js'
 import { initCallSocket } from './socket/callSocket.js'
+import { syncProPlans } from './Controllers/planController.js'
+import { promptReviews } from './utils/reviewPrompts.js'
+import { sendOffers } from './utils/offers.js'
+import { sendReminders } from './utils/reminders.js'
+import { sweepWaitlist } from './Controllers/waitlistController.js'
 import helmet from 'helmet'
 import { isDemoMode } from './utils/demo.js'
 import { nextResetAt, scheduleDemoReset } from './demo/resetDemo.js'
@@ -85,6 +94,8 @@ app.use('/api/v1/prescriptions',prescriptionRoute)
 app.use('/api/v1/messages',messageRoute)
 app.use('/api/v1/documents',documentRoute)
 app.use('/api/v1/symptom-check',symptomRoute)
+app.use('/api/v1/plus',plusRoute)
+app.use('/api/v1/notifications',notificationRoute)
 // tells the website, in the demo, when the demo data resets next
 app.get('/api/v1/config', (req, res) => {
   res.json({
@@ -135,8 +146,25 @@ initCallSocket(server);
 // Connect to the database first, then start the server
 connectDB().then(async () => {
   await migrateOldBookings().catch(error => logger.error('Booking migration failed:', error.message));
-  // every 5 minutes: cancel and refund requests the doctor never answered
-  setInterval(() => expireUnansweredRequests().catch(error => logger.error('Request expiry failed:', error.message)), 5 * 60 * 1000);
+  // commission, plan prices and refund rates the admin saved replace the .env defaults
+  await loadMoneySettings().catch(error => logger.error('Money settings failed to load:', error.message));
+  // every 5 minutes: cancel and refund requests the doctor never answered, and settle missed video calls
+  // (BACKGROUND_JOBS=off for a second local server that shares the database, so jobs don't run twice)
+  if (process.env.BACKGROUND_JOBS !== 'off') setInterval(() => {
+    expireUnansweredRequests().catch(error => logger.error('Request expiry failed:', error.message));
+    settleMissedCalls().catch(error => logger.error('Missed call check failed:', error.message));
+    // Pro subscriptions whose month is over: renewed ones continue, ended ones go back to the free plan
+    syncProPlans().catch(error => logger.error('Plan sync failed:', error.message));
+    // the same for patients' Medora Plus memberships (and renewal reminders for both)
+    syncPlusPlans().catch(error => logger.error('Plus sync failed:', error.message));
+    // "How was your visit?" after visits that took place
+    promptReviews().catch(error => logger.error('Review prompts failed:', error.message));
+    // upgrade suggestions, at most one every 15 days per person
+    sendOffers().catch(error => logger.error('Offers failed:', error.message));
+    // appointment reminders (a day and an hour before) and waitlist alerts for slots that opened
+    sendReminders().catch(error => logger.error('Reminders failed:', error.message));
+    sweepWaitlist().catch(error => logger.error('Waitlist check failed:', error.message));
+  }, 5 * 60 * 1000);
   // demo: put the demo data back every few hours, whatever visitors did with it.
   // Off unless DEMO_AUTO_RESET=true, because it deletes what visitors created in the database.
   if (autoResetOn()) scheduleDemoReset(error => logger.error('Demo reset failed:', error));

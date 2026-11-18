@@ -17,6 +17,12 @@ const prescriptionSchema = new mongoose.Schema(
     booking: { type: mongoose.Types.ObjectId, ref: "Booking", required: true, unique: true },
     doctor: { type: mongoose.Types.ObjectId, ref: "Doctor", required: true },
     user: { type: mongoose.Types.ObjectId, ref: "User", required: true },
+    // written for a family member of the account holder (copied from the booking)
+    familyMember: {
+      _id: { type: mongoose.Types.ObjectId },
+      name: { type: String },
+      relation: { type: String },
+    },
     diagnosis: { type: String, required: true, trim: true, maxLength: 200 },
     symptoms: { type: String, trim: true, maxLength: 500 },
     medicines: { type: [medicineSchema], default: [] },
@@ -26,6 +32,8 @@ const prescriptionSchema = new mongoose.Schema(
     // the patient's plain-words explanation from the AI, kept so it isn't asked again;
     // cleared whenever the doctor edits the prescription
     explanation: { type: mongoose.Schema.Types.Mixed },
+    // the same in other languages: { hi: {...}, ta: {...} }
+    explanations: { type: mongoose.Schema.Types.Mixed },
   },
   { timestamps: true }
 );

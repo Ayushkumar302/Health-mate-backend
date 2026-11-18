@@ -20,11 +20,11 @@ export const createRateLimiter = ({ count, windowMs }) => {
     }
   }, 60 * 1000).unref();
 
-  // returns true when the action is allowed (and records it)
-  return key => {
+  // returns true when the action is allowed (and records it); `limit` overrides the count for this key
+  return (key, limit = count) => {
     const now = Date.now();
     const recent = (hits.get(key) || []).filter(time => time > now - windowMs);
-    if (recent.length >= count) {
+    if (recent.length >= limit) {
       hits.set(key, recent);
       return false;
     }

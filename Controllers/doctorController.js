@@ -9,10 +9,65 @@ import { cleanText } from "../utils/text.js";
 import logger from "../utils/logger.js"
 import { DEMO_LOCKED_DOCTOR_FIELDS, changedLockedFields, sanitizeDoctorUpdate } from "../utils/validate.js";
 import { passwordProblem } from "../utils/tokens.js";
+import { bookingWindowFor, confirmsInstantly, doctorTier, isPro, planBadgeOf, timeOffLimitFor } from "../utils/plans.js";
+import { proVisibility } from "../utils/featured.js";
+import { LISTED, onboardingOf } from "../utils/onboarding.js";
+import { CONSULTATION_TYPES } from "../utils/consultation.js";
+import { MIN_REVIEWS, refreshReviewSummary, reviewSummaryOf } from "../utils/ai/reviewSummary.js";
+import { searchWithAI, searchWithRules } from "../utils/ai/doctorSearch.js";
+import { takeAiQuota } from "../utils/ai/quota.js";
+
+// specialties that have listed doctors (what plain-words search may pick), refreshed every 5 minutes
+let specialtyCache = { at: 0, list: [] };
+export const listedSpecialties = async () => {
+    if (Date.now() - specialtyCache.at < 5 * 60 * 1000 && specialtyCache.list.length) return specialtyCache.list;
+    const list = (await Doctor.distinct("specialization", LISTED)).map(name => String(name).toLowerCase()).filter(Boolean);
+    specialtyCache = { at: Date.now(), list: [...new Set(list)].sort() };
+    return specialtyCache.list;
+};
+
+// GET /doctors/search/ai?q=  turn a sentence ("skin doctor under 600 free today", Hindi too) into search filters
+export const aiSearch = async (req, res) => {
+    const text = cleanText(req.query.q).replace(/\s+/g, " ").slice(0, 200);
+    if (text.length < 3) return res.status(400).json({ success: false, message: "Describe what you're looking for" });
+    try {
+        const specialties = await listedSpecialties();
+        if (takeAiQuota(req) === "ok") {
+            try {
+                return res.status(200).json({ success: true, data: { ...(await searchWithAI(text, specialties)), source: "ai" } });
+            } catch (error) {
+                logger.error("AI search error:", error.message);
+            }
+        }
+        res.status(200).json({ success: true, data: { ...searchWithRules(text, specialties), source: "rules" } });
+    } catch (error) {
+        res.status(500).json({ success: false, message: "Could not understand the search" });
+    }
+};
 
 // fields hidden on the public doctor pages
 // public pages show the profile, never contact details or admin notes
-const PUBLIC_EXCLUDE = "-password -__v -registrationNumber -email -phone -reviewNote -reviewedAt -emailVerified -isDemo -appointments -role -createdAt -updatedAt -timeOff.reason";
+const PUBLIC_EXCLUDE = "-password -__v -registrationNumber -email -phone -reviewNote -reviewedAt -emailVerified -isDemo -appointments -role -createdAt -updatedAt -timeOff.reason -payoutsEnabled -profileViews";
+
+// what patients see of a doctor's plan: the badges and booking rules it gives, never the subscription itself
+const toPublic = (doctor, visibility, { showFeatured = false } = {}) => {
+    const { plan, instantBooking, clinic, reviewSummary, offers, ...rest } = doctor.toObject();
+    const id = String(doctor._id);
+    return {
+        ...rest,
+        // "What patients say" (AI): only while the doctor is on Pro or Pro Clinic
+        ...(reviewSummaryOf(doctor) && { reviewSummary }),
+        isPro: isPro(doctor),
+        // "Pro" or "Pro Clinic" (none for Free and Starter)
+        planBadge: planBadgeOf(doctor),
+        // the clinic's name, logo and photos: only while on Pro Clinic
+        ...(doctorTier(doctor).clinicBranding && clinic?.name && { clinic }),
+        featured: showFeatured && visibility.featured.has(id),
+        availableToday: visibility.availableToday.has(id),
+        instantBooking: confirmsInstantly(doctor),
+        bookingWindowDays: bookingWindowFor(doctor),
+    };
+};
 
 // escape regex special characters so search text is matched literally
 const escapeRegex = text => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -88,31 +143,41 @@ export const deleteDoctor = async (req, res) => {
 export const getsingleDoctor = async (req, res) => {
     const id = req.params.id;
     try {
-        // doctors that are not verified yet are not public
-        const doctor = await Doctor.findOne({ _id: id, isApproved: "approved" }).populate('reviews').select(PUBLIC_EXCLUDE);
+        // doctors that are not verified or haven't finished setting up are not public
+        const doctor = await Doctor.findOne({ _id: id, ...LISTED }).populate('reviews').select(PUBLIC_EXCLUDE);
         if (!doctor) {
             return res.status(404).json({ success: false, message: "Doctor not found" });
         }
-        res.status(200).json({ success: true, message: "Doctor found successfully", data: doctor });
+        // counted for the doctor's own analytics (Pro)
+        Doctor.updateOne({ _id: doctor._id }, { $inc: { profileViews: 1 } }, { timestamps: false }).catch(() => {});
+        // reviews changed since the AI summary was made: a new one is made in the background
+        if (doctorTier(doctor).aiTools && doctor.reviews.length >= MIN_REVIEWS && doctor.reviewSummary?.count !== doctor.reviews.length) {
+            refreshReviewSummary(doctor._id);
+        }
+        res.status(200).json({ success: true, message: "Doctor found successfully", data: toPublic(doctor, await proVisibility()) });
     } catch (error) {
         res.status(500).json({ success: false, message: "Error retrieving doctor" });
     }
 };
 
-// GET /doctors/:id/slots?date=YYYY-MM-DD -> the doctor's slots on that day and whether each is free
+// GET /doctors/:id/slots?date=YYYY-MM-DD&type=clinic|video|quick-call -> the doctor's slots on that day and
+// whether each is free (with a type: only the shifts of the weekly routine that offer that kind of visit)
 export const getAvailableSlots = async (req, res) => {
     const { date } = req.query;
+    const type = CONSULTATION_TYPES.includes(req.query.type) ? req.query.type : undefined;
     if (!isValidDate(date)) {
         return res.status(400).json({ success: false, message: "Please provide a date as YYYY-MM-DD" });
     }
     try {
-        const doctor = await Doctor.findOne({ _id: req.params.id, isApproved: "approved" }).select("timeSlots slotDuration timeOff");
+        const doctor = await Doctor.findOne({ _id: req.params.id, ...LISTED }).select("timeSlots slotDuration bufferMinutes timeOff plan");
         if (!doctor) {
             return res.status(404).json({ success: false, message: "Doctor not found" });
         }
-        const slots = await getSlotsForDate(doctor, date);
+        const windowDays = bookingWindowFor(doctor);
+        // beyond the doctor's booking window nothing is offered
+        const slots = daysFromTo(clinicToday(), date) > windowDays ? [] : await getSlotsForDate(doctor, date, type);
         const leave = leaveOn(doctor, date);
-        res.status(200).json({ success: true, message: "Slots found", data: slots, ...(leave && { onLeave: { from: leave.from, to: leave.to } }) });
+        res.status(200).json({ success: true, message: "Slots found", data: slots, windowDays, ...(leave && { onLeave: { from: leave.from, to: leave.to } }) });
     } catch (error) {
         res.status(500).json({ success: false, message: "Error retrieving slots" });
     }
@@ -145,9 +210,15 @@ export const getAllDoctor = async (req, res) => {
         const page = Math.floor(numberParam(req.query.page, 1, 1000) || 1);
         const limit = Math.floor(numberParam(req.query.limit, 1, MAX_PAGE_SIZE) || 9);
         const sort = SORTS[req.query.sort] || SORTS.recommended;
+        // paid placement only in the default order; when a patient sorts by price or rating, that order is kept
+        const showFeatured = sort === SORTS.recommended;
+        const visibility = await proVisibility();
 
-        const listed = { isApproved: "approved" };
+        // verified doctors who finished onboarding (profile, weekly hours, payout account)
+        const listed = LISTED;
         const filter = { ...listed };
+        // "Available today": Pro doctors who still have a free slot today
+        if (req.query.availableToday === "true") filter._id = { $in: [...visibility.availableToday] };
         if (query) {
             const safeQuery = escapeRegex(query);
             filter.$or = [
@@ -161,17 +232,34 @@ export const getAllDoctor = async (req, res) => {
         }
         if (minRating) filter.averageRating = { $gte: minRating };
 
+        // featured doctors that match the search come first, the rest follow in the usual order
+        const skip = (page - 1) * limit;
+        const featuredIds = showFeatured ? [...visibility.featured] : [];
+        const first = featuredIds.length
+            ? await Doctor.find({ $and: [filter, { _id: { $in: featuredIds } }] }).select(PUBLIC_EXCLUDE).sort(sort)
+            : [];
+        const fromFirst = first.slice(skip, skip + limit);
+        const findDoctors = async () => {
+            if (fromFirst.length === limit) return fromFirst;
+            const rest = await Doctor.find({ $and: [filter, { _id: { $nin: featuredIds } }] })
+                .select(PUBLIC_EXCLUDE)
+                .sort(sort)
+                .skip(Math.max(0, skip - first.length))
+                .limit(limit - fromFirst.length);
+            return [...fromFirst, ...rest];
+        };
+
         const [doctors, total, specialties, priceRange] = await Promise.all([
-            Doctor.find(filter).select(PUBLIC_EXCLUDE).sort(sort).skip((page - 1) * limit).limit(limit),
+            findDoctors(),
             Doctor.countDocuments(filter),
             // filter options shown on the page, from every listed doctor
             Doctor.aggregate([
-                { $match: { ...listed, specialization: { $nin: [null, ""] } } },
+                { $match: listed },
                 { $group: { _id: { $toLower: "$specialization" }, label: { $first: "$specialization" }, count: { $sum: 1 } } },
                 { $sort: { count: -1, _id: 1 } },
             ]),
             Doctor.aggregate([
-                { $match: { ...listed, ticketPrice: { $gt: 0 } } },
+                { $match: listed },
                 { $group: { _id: null, min: { $min: "$ticketPrice" }, max: { $max: "$ticketPrice" } } },
             ]),
         ]);
@@ -179,8 +267,9 @@ export const getAllDoctor = async (req, res) => {
         res.status(200).json({
             success: true,
             message: "Doctors found successfully",
-            data: doctors,
+            data: doctors.map(doctor => toPublic(doctor, visibility, { showFeatured })),
             pagination: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) },
+            availableToday: visibility.availableToday.size,
             facets: {
                 specialties: specialties.map(item => ({ name: item._id, label: item.label, count: item.count })),
                 price: { min: priceRange[0]?.min || 0, max: priceRange[0]?.max || 0 },
@@ -212,7 +301,9 @@ export const getDoctorprofile = async (req, res) => {
         res.status(200).json({
             success: true,
             message: "Getting doctor profile",
-            data: { ...rest, appointments },
+            // the setup checklist: what is still needed before patients can find this doctor;
+            // aiTools: the plan includes the AI tools (prescription drafts, review summary)
+            data: { ...rest, appointments, onboarding: onboardingOf(doctor), aiTools: doctorTier(doctor).aiTools },
         });
     } catch (error) {
         logger.error("Error fetching doctor profile:", error);
@@ -222,7 +313,7 @@ export const getDoctorprofile = async (req, res) => {
 
 // ---- time off (leave days, holidays)
 
-const MAX_TIME_OFF = 10;
+
 const MAX_TIME_OFF_DAYS = 60;
 const TIME_OFF_AHEAD_DAYS = 365;
 // the shared demo doctors stay bookable for visitors: leave must start 3+ days ahead, last at most a week, 2 at a time
@@ -258,7 +349,7 @@ export const addTimeOff = async (req, res) => {
     if (error) return res.status(400).json({ success: false, message: error });
     const reason = cleanText(req.body.reason).slice(0, 100);
     try {
-        const doctor = await Doctor.findById(req.userId).select("timeOff isDemo");
+        const doctor = await Doctor.findById(req.userId).select("timeOff isDemo plan");
         if (!doctor) return res.status(404).json({ success: false, message: "Doctor not found" });
         const today = clinicToday();
         // leave that is over is dropped
@@ -273,8 +364,12 @@ export const addTimeOff = async (req, res) => {
                 message: `Demo doctors can add up to ${DEMO_TIME_OFF.count} breaks of at most ${DEMO_TIME_OFF.days} days, starting ${DEMO_TIME_OFF.startsIn}+ days from today, so other visitors can still book them`,
             });
         }
-        if (upcoming.length >= MAX_TIME_OFF) {
-            return res.status(400).json({ success: false, message: `You can plan up to ${MAX_TIME_OFF} breaks at a time` });
+        const maxEntries = timeOffLimitFor(doctor);
+        if (upcoming.length >= maxEntries) {
+            return res.status(400).json({
+                success: false,
+                message: isPro(doctor) ? `You can plan up to ${maxEntries} breaks at a time` : `The free plan allows ${maxEntries} planned breaks at a time. Every Pro plan removes this limit`,
+            });
         }
 
         // block the days first, so nobody can book them while the existing bookings are being cancelled

@@ -6,10 +6,13 @@ import { isDemoMode } from "../utils/demo.js";
 import { cleanText, escapeRegex } from "../utils/text.js";
 import { documentsOf } from "./documentController.js";
 import logger from "../utils/logger.js"
+import { STANDARD } from "../utils/earnings.js";
+import { onboardingOf } from "../utils/onboarding.js";
+import { addNotification } from "../utils/notifications.js";
 
 // everything here is behind authenticate + restrict(["admin"])
 
-const DOCTOR_FIELDS = "name email phone photo gender specialization registrationNumber ticketPrice qualifications experiences bio isApproved reviewNote reviewedAt averageRating totalRating createdAt isDemo";
+const DOCTOR_FIELDS = "name email phone photo gender specialization registrationNumber ticketPrice qualifications experiences bio isApproved reviewNote reviewedAt averageRating totalRating createdAt isDemo timeSlots payoutsEnabled";
 
 // "cancelled" is the old name for "suspended"
 const STATUS_FILTERS = {
@@ -47,6 +50,25 @@ const scope = async () => {
   };
 };
 
+// a booking's money inside an aggregation, the same rules as moneyOf() in utils/earnings.js:
+// refunds from before partial refunds only stored the refund id (full refunds); older bookings had no saved rate
+const REFUNDED = { $ifNull: ["$refundedAmount", { $cond: [{ $ifNull: ["$refundId", false] }, "$ticketPrice", 0] }] };
+const KEPT = { $subtract: ["$ticketPrice", REFUNDED] };
+// the part of a Medora Plus member's refund the platform paid, so the doctor's share stayed as without Plus
+const COVERED = { $ifNull: ["$refundCovered", 0] };
+// (bookings from before rates were saved use today's rate)
+// platform = kept - doctor; the doctor is paid on the full fee (listPrice) even when a Plus Family discount
+// lowered what the patient paid, so the discount comes out of the platform's part
+const DOCTOR_PART = {
+  $multiply: [
+    { $add: [KEPT, COVERED] },
+    { $cond: [{ $gt: ["$ticketPrice", 0] }, { $divide: [{ $ifNull: ["$listPrice", "$ticketPrice"] }, "$ticketPrice"] }, 1] },
+    { $subtract: [1, { $ifNull: ["$commissionRate", STANDARD.commissionRate] }] },
+  ],
+};
+const platformShare = () => ({ $subtract: [KEPT, DOCTOR_PART] });
+const rupees = value => Math.round((value || 0) * 100) / 100;
+
 // GET /admin/stats
 export const getStats = async (req, res) => {
   try {
@@ -65,15 +87,16 @@ export const getStats = async (req, res) => {
             _id: null,
             bookings: { $sum: 1 },
             cancelled: { $sum: { $cond: [{ $eq: ["$status", "cancelled"] }, 1, 0] } },
-            revenue: { $sum: { $cond: [{ $ifNull: ["$refundId", false] }, 0, "$ticketPrice"] } },
-            refunded: { $sum: { $cond: [{ $ifNull: ["$refundId", false] }, "$ticketPrice", 0] } },
+            gmv: { $sum: "$ticketPrice" },
+            refunded: { $sum: REFUNDED },
+            platform: { $sum: platformShare() },
           },
         },
       ]),
-      // money kept per month (refunded bookings left out), by payment date
+      // money kept per month and the platform's part of it, by payment date
       Booking.aggregate([
-        { $match: { isPaid: true, refundId: { $exists: false }, createdAt: { $gte: sixMonthsAgo }, ...visible.bookings } },
-        { $group: { _id: { $dateToString: { format: "%Y-%m", date: "$createdAt" } }, revenue: { $sum: "$ticketPrice" }, bookings: { $sum: 1 } } },
+        { $match: { isPaid: true, createdAt: { $gte: sixMonthsAgo }, ...visible.bookings } },
+        { $group: { _id: { $dateToString: { format: "%Y-%m", date: "$createdAt" } }, revenue: { $sum: KEPT }, platform: { $sum: platformShare() }, bookings: { $sum: 1 } } },
       ]),
       Booking.aggregate([
         { $match: { isPaid: true, ...visible.bookings } },
@@ -96,11 +119,13 @@ export const getStats = async (req, res) => {
       const date = new Date(sixMonthsAgo);
       date.setUTCMonth(sixMonthsAgo.getUTCMonth() + i);
       const found = monthly.find(item => item._id === monthKey(date));
-      months.push({ month: monthKey(date), revenue: found?.revenue || 0, bookings: found?.bookings || 0 });
+      months.push({ month: monthKey(date), revenue: rupees(found?.revenue), platform: rupees(found?.platform), bookings: found?.bookings || 0 });
     }
 
     const doctors = Object.fromEntries(doctorCounts.map(item => [item._id, item.count]));
-    const totals = bookingTotals[0] || { bookings: 0, cancelled: 0, revenue: 0, refunded: 0 };
+    const totals = bookingTotals[0] || { bookings: 0, cancelled: 0, gmv: 0, refunded: 0, platform: 0 };
+    const kept = rupees(totals.gmv - totals.refunded);
+    const platformRevenue = rupees(totals.platform);
 
     res.status(200).json({
       success: true,
@@ -115,8 +140,13 @@ export const getStats = async (req, res) => {
         },
         bookings: totals.bookings,
         cancelled: totals.cancelled,
-        revenue: totals.revenue,
-        refunded: totals.refunded,
+        // GMV: everything patients paid; revenue: what was kept after refunds; platform revenue: the commission part
+        gmv: rupees(totals.gmv),
+        revenue: kept,
+        refunded: rupees(totals.refunded),
+        platformRevenue,
+        doctorEarnings: rupees(kept - platformRevenue),
+        commissionRate: STANDARD.commissionRate,
         months,
         bySpecialty: bySpecialty.map(item => ({ specialization: item._id || "other", bookings: item.bookings })),
         recentBookings: recentBookings.filter(booking => booking.user && booking.doctor),
@@ -160,6 +190,8 @@ export const getDoctors = async (req, res) => {
         ...doctor.toObject(),
         bookings: countOf[String(doctor._id)] || 0,
         documents: documents.filter(document => String(document.owner) === String(doctor._id)),
+        // setup steps the doctor still has to finish before patients can find them
+        onboarding: onboardingOf(doctor),
       })),
     });
   } catch (error) {
@@ -204,8 +236,20 @@ export const updateDoctorStatus = async (req, res) => {
       return res.status(409).json({ success: false, message: "Someone else just updated this doctor, please refresh" });
     }
 
-    const messages = { approve: "Doctor approved, their profile is now listed", reject: "Application rejected", suspend: "Doctor suspended and hidden from patients" };
-    res.status(200).json({ success: true, message: messages[action], data: updated });
+    const setup = onboardingOf(updated);
+    const messages = {
+      approve: setup.ready ? "Doctor approved, their profile is now listed" : "Doctor verified. They'll be listed once they finish their setup (weekly hours, payout account)",
+      reject: "Application rejected",
+      suspend: "Doctor suspended and hidden from patients",
+    };
+    // the doctor hears about it in their notification centre
+    const notices = {
+      approve: { title: "You're verified", text: setup.ready ? "Your profile is now listed and patients can book you." : "Finish the setup checklist on your dashboard and patients can start booking you." },
+      reject: { title: "Application not approved", text: note || "Your application was not approved. Contact Medora for details." },
+      suspend: { title: "Your profile is hidden", text: note || "Medora has suspended your profile. Contact Medora for details." },
+    };
+    await addNotification("doctor", updated._id, { kind: "account", ...notices[action] });
+    res.status(200).json({ success: true, message: messages[action], data: { ...updated.toObject(), onboarding: setup } });
   } catch (error) {
     res.status(500).json({ success: false, message: "Could not update the doctor" });
   }

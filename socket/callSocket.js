@@ -4,7 +4,7 @@ import jwt from "jsonwebtoken";
 import User from "../models/UserSchema.js";
 import Doctor from "../models/DoctorSchema.js";
 import Booking from "../models/BookingSchema.js";
-import { EXTEND_MINUTES, checkCallAccess, extendCall, formatDoctorName } from "../utils/video.js";
+import { EXTEND_MINUTES, checkCallAccess, extendCall, formatDoctorName, recordJoin } from "../utils/video.js";
 import { cleanText } from "../utils/text.js";
 import { personRoom, setIO } from "./io.js";
 import { corsOrigin } from "../middleware/security.js";
@@ -156,6 +156,7 @@ export const initCallSocket = httpServer => {
 
         await socket.join(room);
         scheduleCallEnd(socket, room, window.closesAt);
+        recordJoin(booking._id, role).catch(error => logger.error("Could not record call join:", error.message));
         // the person already waiting starts the connection when someone new arrives
         socket.to(room).emit("peer-joined", { name: socket.data.name, role, photo: socket.data.photo });
         const peer = peers[0];

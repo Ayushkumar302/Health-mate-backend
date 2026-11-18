@@ -24,15 +24,16 @@ const models = () => {
 // text from people (symptoms, report titles...) is wrapped in quotes; this keeps it from closing them early
 export const quoted = text => `"""\n${String(text).replace(/"{2,}/g, '"')}\n"""`;
 
-const askModel = async (model, { system, prompt, schema }, signal) => {
+// files: [{ mimeType, data (base64) }] sent along with the prompt (a PDF or photo of a report)
+const askModel = async (model, { system, prompt, schema, files = [], maxTokens = 4096 }, signal) => {
   const res = await fetch(`${API}/${model}:generateContent`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-goog-api-key": process.env.GEMINI_API_KEY },
     signal,
     body: JSON.stringify({
       systemInstruction: { parts: [{ text: system }] },
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: { responseMimeType: "application/json", responseSchema: schema, maxOutputTokens: 4096 },
+      contents: [{ role: "user", parts: [...files.map(file => ({ inlineData: { mimeType: file.mimeType, data: file.data } })), { text: prompt }] }],
+      generationConfig: { responseMimeType: "application/json", responseSchema: schema, maxOutputTokens: maxTokens },
     }),
   });
   const body = await res.json().catch(() => ({}));
@@ -42,9 +43,12 @@ const askModel = async (model, { system, prompt, schema }, signal) => {
   return JSON.parse(text);
 };
 
-// { model, answer } with the raw answer (still to be checked by the caller), or rejects when no model answered in time
+// { model, answer } with the raw answer (still to be checked by the caller), or rejects when no model answered in time.
+// Reading a whole report takes longer: request.totalMs / request.hedgeMs give it more time.
 export const generateJson = request =>
   new Promise((resolve, reject) => {
+    const hedgeMs = request.hedgeMs || HEDGE_MS;
+    const totalMs = request.totalMs || TOTAL_MS;
     const list = models();
     const controller = new AbortController();
     let started = 0;
@@ -72,8 +76,8 @@ export const generateJson = request =>
           if (failed === list.length) finish(reject, error);
           else startNext();
         });
-      hedgeTimer = setTimeout(startNext, HEDGE_MS);
+      hedgeTimer = setTimeout(startNext, hedgeMs);
     };
-    const deadline = setTimeout(() => finish(reject, new Error("Gemini took too long")), TOTAL_MS);
+    const deadline = setTimeout(() => finish(reject, new Error("Gemini took too long")), totalMs);
     startNext();
   });

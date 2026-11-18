@@ -81,19 +81,30 @@ export const appointmentEpoch = (date, time) => Date.parse(`${date}T${time}:00Z`
 
 export const makeSlotKey = (doctorId, date, time) => `${doctorId}_${date}_${time}`;
 
-// every slot start time the doctor offers on that date, based on their weekly time slots
-export const generateSlotTimes = (doctor, date) => {
+// A shift of the weekly routine says how patients can see the doctor then: "both" (default), "clinic" (in person
+// only) or "online" (video consultations and quick calls only)
+export const SHIFT_MODES = ["both", "clinic", "online"];
+const shiftAllows = (slot, type) => {
+  const mode = slot.mode || "both";
+  if (!type || mode === "both") return true;
+  return mode === "clinic" ? type === "clinic" : type !== "clinic";
+};
+
+// every slot start time the doctor offers on that date, based on their weekly routine. With a consultation
+// type only the shifts that offer it count. Appointments follow each other with the doctor's break in between.
+export const generateSlotTimes = (doctor, date, type) => {
   // on leave: nothing to offer (this also blocks booking and rescheduling onto that day)
   if (leaveOn(doctor, date)) return [];
   const day = WEEK_DAYS[new Date(`${date}T00:00:00Z`).getUTCDay()];
   const duration = doctor.slotDuration || 30;
+  const step = duration + (doctor.bufferMinutes || 0);
   const times = new Set();
 
   (doctor.timeSlots || [])
-    .filter(slot => slot.day?.toLowerCase() === day && isValidTime(slot.startingTime) && isValidTime(slot.EndingTime))
+    .filter(slot => slot.day?.toLowerCase() === day && isValidTime(slot.startingTime) && isValidTime(slot.EndingTime) && shiftAllows(slot, type))
     .forEach(slot => {
       const end = toMinutes(slot.EndingTime);
-      for (let start = toMinutes(slot.startingTime); start + duration <= end; start += duration) {
+      for (let start = toMinutes(slot.startingTime); start + duration <= end; start += step) {
         times.add(toTime(start));
       }
     });
@@ -114,15 +125,20 @@ export const releaseExpiredHold = slotKey =>
   );
 
 // returns an error message if the doctor does not offer this date/time, otherwise null
-export const validateSlot = (doctor, date, time) => {
+// (windowDays: how far ahead this doctor can be booked, longer on the Pro plan)
+export const validateSlot = (doctor, date, time, windowDays = BOOKING_WINDOW_DAYS, type) => {
   if (!isValidDate(date) || !isValidTime(time)) {
     return "Please choose a valid date and time";
   }
   const daysAhead = daysBetween(clinicNow().date, date);
-  if (daysAhead < 0 || daysAhead > BOOKING_WINDOW_DAYS) {
-    return `Appointments can be booked up to ${BOOKING_WINDOW_DAYS} days ahead`;
+  if (daysAhead < 0 || daysAhead > windowDays) {
+    return `Appointments can be booked up to ${windowDays} days ahead`;
   }
-  if (!generateSlotTimes(doctor, date).includes(time)) {
+  if (!generateSlotTimes(doctor, date, type).includes(time)) {
+    // the doctor works then, but not for this kind of visit
+    if (type && generateSlotTimes(doctor, date).includes(time)) {
+      return type === "clinic" ? "The doctor only does video consultations at this time" : "The doctor only sees patients at the clinic at this time";
+    }
     return "The doctor is not available at this time";
   }
   if (minutesUntil(date, time) <= 0) {
@@ -132,8 +148,8 @@ export const validateSlot = (doctor, date, time) => {
 };
 
 // all slots of a day with their availability, past slots are left out
-export const getSlotsForDate = async (doctor, date) => {
-  const times = generateSlotTimes(doctor, date).filter(time => minutesUntil(date, time) > 0);
+export const getSlotsForDate = async (doctor, date, type) => {
+  const times = generateSlotTimes(doctor, date, type).filter(time => minutesUntil(date, time) > 0);
   if (times.length === 0) return [];
 
   const bookings = await Booking.find({ doctor: doctor._id, appointmentDate: date, slotKey: { $exists: true } });

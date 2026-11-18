@@ -12,6 +12,9 @@ import Review from "../models/ReviewSchema.js";
 import Document from "../models/DocumentSchema.js";
 import { deleteFile, saveFile } from "../utils/files.js";
 import { makeSamplePdf } from "./samplePdf.js";
+import { connectDemoDoctors } from "./demoPayouts.js";
+import logger from "../utils/logger.js";
+import { STANDARD } from "../utils/earnings.js";
 
 
 // unique to this project, so browsers don't flag it as a breached password (they did with "Test@1234")
@@ -314,6 +317,9 @@ const clinicDate = days =>
   new Date(Date.now() + days * 86400000).toLocaleDateString("en-CA", { timeZone: process.env.CLINIC_TIMEZONE || "Asia/Kolkata" });
 const daysAgo = days => new Date(Date.now() - days * 86400000);
 
+const DEMO_PRO_DOCTOR = "ananya.rao@healthmate.test";
+const DEMO_CLINIC_DOCTOR = "sara.thomas@healthmate.test";
+
 export const seedDemoData = async () => {
   const password = await bcrypt.hash(PASSWORD, 10);
 
@@ -362,6 +368,23 @@ export const seedDemoData = async () => {
       { $set: { clinicAddress: hospital.includes(",") ? hospital : `${hospital}, Bengaluru`, photo: portraitFor(listed.email) } }
     );
   }
+  // one listed doctor is on Pro and one on Pro Clinic, so the badges, the Featured label, the longer booking
+  // windows and the lower commissions can be seen without buying a plan (no Stripe subscription behind them)
+  await Doctor.updateOne(
+    { email: DEMO_PRO_DOCTOR },
+    { $set: { plan: { name: "pro", since: daysAgo(45), expiresAt: daysAgo(-30), autoRenew: true }, instantBooking: false } }
+  );
+  await Doctor.updateOne(
+    { email: DEMO_CLINIC_DOCTOR },
+    {
+      $set: {
+        plan: { name: "clinic", since: daysAgo(80), expiresAt: daysAgo(-20), autoRenew: true },
+        instantBooking: false,
+        clinic: { name: "Thomas Child & Family Clinic", photos: [] },
+      },
+    }
+  );
+
   // two sample applicants have a photo, the third one is missing it (shows up in the admin checklist)
   for (const email of ["karan.malhotra@applicant.test", "meera.nair@applicant.test"]) {
     await Doctor.updateOne({ email }, { $set: { photo: portraitFor(email) } });
@@ -406,8 +429,11 @@ export const seedDemoData = async () => {
             slotDuration: quick ? 10 : 30,
             extendedMinutes: 0,
             slotKey: `${doctor._id}_${visit.date}_${visit.time}`,
+            commissionRate: STANDARD.commissionRate,
+            joinsTracked: visit.type !== "clinic",
+            rescheduleCount: 0,
           },
-          $unset: { refundId: 1, cancelledBy: 1, declineReason: 1, respondedAt: 1 },
+          $unset: { refundId: 1, refundedAmount: 1, cancelledBy: 1, declineReason: 1, respondedAt: 1, joinedAt: 1, noShow: 1, settledAt: 1, reviewPromptedAt: 1 },
         },
         { upsert: true }
       );
@@ -449,11 +475,13 @@ export const seedDemoData = async () => {
           consultationType: visit.key % 2 === 0 ? "clinic" : "video",
           slotDuration: visitDoctor.slotDuration || 30,
           status: visit.refunded ? "cancelled" : "approved",
-          ...(visit.refunded && { refundId: `seed-refund-${visit.key}`, cancelledBy: "patient" }),
+          commissionRate: STANDARD.commissionRate,
+          // refunded ones were requests withdrawn before the doctor answered: a full refund
+          ...(visit.refunded && { refundId: `seed-refund-${visit.key}`, refundedAmount: visitDoctor.ticketPrice, cancelledBy: "patient" }),
           createdAt: paidAt,
           updatedAt: paidAt,
         },
-        $unset: { slotKey: 1, ...(!visit.refunded && { refundId: 1, cancelledBy: 1 }) },
+        $unset: { slotKey: 1, reviewPromptedAt: 1, ...(!visit.refunded && { refundId: 1, refundedAmount: 1, cancelledBy: 1 }) },
       },
       { new: true, upsert: true, timestamps: false }
     );
@@ -611,6 +639,9 @@ export const seedDemoData = async () => {
       await addSample("doctor", account._id, category, title, lines);
     }
   }
+
+  // payout accounts for the listed demo doctors (Stripe test mode); the demo still works without them
+  await connectDemoDoctors().catch(error => logger.error("Demo payout accounts not set up:", error.message));
 
   return {
     admin: adminData.email,

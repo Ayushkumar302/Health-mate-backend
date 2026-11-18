@@ -39,6 +39,13 @@ export const streamFile = (fileId, res) =>
     bucket().openDownloadStream(fileId).on("error", reject).on("end", resolve).pipe(res);
   });
 
+// the whole file in memory (files are at most 5 MB), e.g. to send it to the report reader
+export const readFile = fileId =>
+  new Promise((resolve, reject) => {
+    const chunks = [];
+    bucket().openDownloadStream(fileId).on("data", chunk => chunks.push(chunk)).on("error", reject).on("end", () => resolve(Buffer.concat(chunks)));
+  });
+
 export const deleteFile = async fileId => {
   try {
     await bucket().delete(fileId);

@@ -61,6 +61,13 @@ export const checkCallAccess = async ({ bookingId, userId, role }) => {
   return { booking, window };
 };
 
+// a video call's first join of each side, so a missed call can be settled afterwards (settleMissedCalls)
+export const recordJoin = (bookingId, role) =>
+  Booking.updateOne(
+    { _id: bookingId, [`joinedAt.${role}`]: { $exists: false } },
+    { $set: { [`joinedAt.${role}`]: new Date() } }
+  );
+
 export const formatDoctorName = name => (name ? (/^dr\.?\s/i.test(name) ? name : `Dr. ${name}`) : "Doctor");
 
 const to12Hour = time => {

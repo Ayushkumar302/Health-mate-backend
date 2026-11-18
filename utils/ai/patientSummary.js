@@ -11,7 +11,7 @@ Rules:
 - "lines": exactly 3 lines, each under 30 words:
   1. who the patient is (age, sex, key conditions, current medicines),
   2. their history with this doctor (visits, last diagnosis and treatment),
-  3. what is new (recent symptom checks, uploaded reports, the upcoming visit).
+  3. what is new (the pre-visit form if there is one, recent symptom checks, uploaded reports, the upcoming visit).
 - "watchOuts": up to 3 things to keep in mind, only from recorded facts (allergies, conditions, current medicines,
   urgent symptom checks). Say "Check" rather than claiming a drug interaction is certain.
 - "askAbout": up to 3 short questions worth asking in this visit.
@@ -40,6 +40,7 @@ const describe = facts =>
       `Earlier prescriptions by this doctor: ${joined(facts.prescriptions.map(item => `${item.date}: ${item.diagnosis} (${joined(item.medicines, "no medicines")})`), "none")}.`,
       `Symptom checks the patient saved: ${joined(facts.symptomChecks.map(item => `${item.date}: "${item.described}" -> ${item.urgency}, suggested ${item.specialty || "-"}`), "none")}.`,
       `Reports uploaded: ${joined(facts.reports.map(item => `${item.date || "undated"} ${item.category}: ${item.title}`), "none")}.`,
+      facts.intake && `Pre-visit form for the upcoming visit: ${facts.intake.complaint}. ${joined(facts.intake.details, "")}${facts.intake.redFlags?.length ? ` Red flags mentioned: ${facts.intake.redFlags.join(", ")}.` : ""}`,
     ]
       .filter(Boolean)
       .join("\n")
@@ -56,6 +57,7 @@ export const plainSummary = facts => {
   ].filter(Boolean);
   const last = facts.prescriptions[0];
   const recent = [
+    facts.intake && `coming for "${facts.intake.complaint}"`,
     facts.symptomChecks[0] && `saved symptom check "${facts.symptomChecks[0].described}" (${facts.symptomChecks[0].urgency})`,
     facts.reports.length && `${facts.reports.length} report${facts.reports.length === 1 ? "" : "s"} uploaded, latest "${facts.reports[0].title}"`,
     facts.nextVisit && `upcoming: ${facts.nextVisit}`,
@@ -66,7 +68,7 @@ export const plainSummary = facts => {
       `${facts.visits} visit${facts.visits === 1 ? "" : "s"} with you${last ? `; last diagnosis ${last.diagnosis} (${last.date})${last.medicines.length ? `, given ${last.medicines.join(", ")}` : ""}` : ", no prescriptions yet"}.`,
       recent.length ? `${recent.join("; ")}.`.replace(/^./, char => char.toUpperCase()) : "Nothing new since the last visit.",
     ],
-    watchOuts: facts.allergies?.length ? [`Allergic to ${facts.allergies.join(", ")}`] : [],
+    watchOuts: [facts.allergies?.length && `Allergic to ${facts.allergies.join(", ")}`, ...(facts.intake?.redFlags || [])].filter(Boolean).slice(0, 3),
     askAbout: [],
   };
 };
